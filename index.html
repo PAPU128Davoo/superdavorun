@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SUPER DAVO RUN - CODE & ADMIN EDITION</title>
+    <style>
+        body {
+            margin: 0; background: radial-gradient(circle, #222 0%, #050505 100%);
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; font-family: 'Arial Black', sans-serif;
+            overflow: hidden; user-select: none;
+        }
+        canvas {
+            border: 5px solid #ff7f11;
+            box-shadow: 0 0 50px rgba(255, 127, 17, 0.3), inset 0 0 20px rgba(0,0,0,0.6);
+            background-color: #080a14; border-radius: 28px; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="gameCanvas" width="750" height="600"></canvas>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+let horizonY = 230;
+const lanesX = [130, 375, 620];
+
+// --- PERSISTENCIA LOCALSTORAGE ---
+let highScore = parseInt(localStorage.getItem("davo_high")) || 0;
+let totalCoins = parseInt(localStorage.getItem("davo_coins")) || 0;
+let keysCount = parseInt(localStorage.getItem("davo_keys")) || 5;
+let boardsCount = parseInt(localStorage.getItem("davo_boards")) || 3;
+let isAdmin = localStorage.getItem("davo_admin") === "true"; // Estado Admin oculto
+
+let rewardMessage = ""; let rewardTimer = 0;
+let gameSpeed = 0.008;
+
+const player = {
+    lane: 1, targetX: 375, currentX: 375, baseY: 510, jumpY: 0, vy: 0,
+    gravity: 0.72, jumpForce: -14.5, isGrounded: true, isDucking: false, duckTimer: 0,
+    width: 46, height: 80, speed: 0.25, runFrame: 0,
+    magnet: 0, jetpack: 0, hoverboard: 0, invulnerable: 0
+};
+
+let obstacles = []; let coins = []; let items = []; let particles = [];
+
+let score = 0; let coinsCollected = 0;
+let baseMultiplier = 3;
+let currentRunMultiplier = 3;
+let spawnTimer = 0; let coinTimer = 0; let itemTimer = 0;
+let textureOffset = 0;
+
+let gameState = "MENU";
+let menuSubState = "MAIN";
+let menuPulse = 0;
+let gameOverTimer = 0;
+let flashRedEffect = 0;
+
+let currentKeysToRevive = 1;
+
+const pauseBtn = { x: 685, y: 115, w: 45, h: 42 };
+
+const buttons = [
+    { id: "TOPRUN", x: 150, y: 505, w: 130, h: 65, color: "#1b6ca8", stroke: "#3498db", text: "TOP RUN" },
+    { id: "ME",     x: 310, y: 505, w: 130, h: 65, color: "#1e7e34", stroke: "#2ecc71", text: "ME" },
+    { id: "SHOP",   x: 470, y: 505, w: 130, h: 65, color: "#6f3093", stroke: "#9b59b6", text: "SHOP" }
+];
+
+function drawCyberPanel(x, y, w, h, strokeColor, fillColor) {
+    ctx.save();
+    ctx.fillStyle = fillColor; ctx.strokeStyle = strokeColor; ctx.lineWidth = 3;
+    ctx.shadowBlur = 10; ctx.shadowColor = strokeColor;
+    const cut = 12;
+    ctx.beginPath();
+    ctx.moveTo(x + cut, y); ctx.lineTo(x + w - cut, y); ctx.lineTo(x + w, y + cut);
+    ctx.lineTo(x + w, y + h - cut); ctx.lineTo(x + w - cut, y + h); ctx.lineTo(x + cut, y + h);
+    ctx.lineTo(x, y + h - cut); ctx.lineTo(x, y + cut); ctx.closePath();
+    ctx.fill(); ctx.shadowBlur = 0; ctx.stroke();
+    ctx.restore();
+}
+
+// GESTIÓN DE CONTROLES
+window.addEventListener("keydown", (e) => {
+    if (gameState === "MENU") {
+        if (menuSubState !== "MAIN") {
+            if (e.code === "Escape") menuSubState = "MAIN";
+            return;
+        }
+        if (e.code === "Space" || e.code === "Enter") startGame();
+        return;
+    }
+
+    if (gameState === "PAUSE") {
+        if (e.code === "KeyP" || e.code === "Escape" || e.code === "Space") {
+            gameState = "PLAYING";
+        }
+        return;
+    }
+
+    if (gameState === "GAMEOVER") {
+        if (e.code === "Space") resetToMenu();
+        if ((e.code === "KeyK" || e.code === "KeyR") && keysCount >= currentKeysToRevive) useKeyToRevive();
+        return;
+    }
+
+    if (e.code === "KeyP" || e.code === "Escape") {
+        if (gameState === "PLAYING") {
+            gameState = "PAUSE";
+            return;
+        }
+    }
+
+    if (e.code === "Space") {
+        if (player.hoverboard <= 0 && boardsCount > 0 && player.jetpack <= 0) {
+            boardsCount--;
+            player.hoverboard = 400;
+            saveToStorage();
+            triggerMessage("¡TABLA ACTIVADA! 🛹⚡");
+        }
+        return;
+    }
+
+    if ((e.code === "ArrowLeft" || e.code === "KeyA") && player.lane > 0) {
+        player.lane--; player.targetX = lanesX[player.lane];
+        addParticle(player.currentX, player.baseY + player.jumpY - 20, "#fff", 4);
+    }
+    if ((e.code === "ArrowRight" || e.code === "KeyD") && player.lane < 2) {
+        player.lane++; player.targetX = lanesX[player.lane];
+        addParticle(player.currentX, player.baseY + player.jumpY - 20, "#fff", 4);
+    }
+
+    if (player.jetpack <= 0) {
+        if ((e.code === "ArrowUp" || e.code === "KeyW") && player.isGrounded && !player.isDucking) {
+            player.vy = player.jumpForce; player.isGrounded = false;
+        }
+        if (e.code === "ArrowDown" || e.code === "KeyS") {
+            if (!player.isGrounded) player.vy = 14;
+            player.isDucking = true; player.duckTimer = 24;
+        }
+    }
+});
+
+canvas.addEventListener("click", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    if (gameState === "MENU") {
+        if (menuSubState === "MAIN") {
+            for (let btn of buttons) {
+                if (clickX >= btn.x && clickX <= btn.x + btn.w && clickY >= btn.y && clickY <= btn.y + btn.h) {
+                    menuSubState = btn.id;
+                    return;
+                }
+            }
+            if (clickY < 480) startGame();
+        } else if (menuSubState === "SHOP") {
+            // Comprar Llave (100 DC)
+            if (clickX >= 165 && clickX <= 315 && clickY >= 285 && clickY <= 335) {
+                if (totalCoins >= 100) { totalCoins -= 100; keysCount++; saveToStorage(); triggerMessage("+1 LLAVE 🔑"); }
+                else { triggerMessage("¡SIN DAVOCOINS SUFICIENTES! 🪙"); }
+                return;
+            }
+            // Comprar Tabla (75 DC)
+            if (clickX >= 335 && clickX <= 485 && clickY >= 285 && clickY <= 335) {
+                if (totalCoins >= 75) { totalCoins -= 75; boardsCount++; saveToStorage(); triggerMessage("+1 TABLA 🛹"); }
+                else { triggerMessage("¡SIN DAVOCOINS SUFICIENTES! 🪙"); }
+                return;
+            }
+            // Botón Canjear Código
+            if (clickX >= 505 && clickX <= 585 && clickY >= 285 && clickY <= 335) {
+                let codeInput = prompt("Introduce tu código promocional:");
+                if (codeInput) {
+                    let cleanCode = codeInput.trim().toUpperCase();
+                    if (cleanCode === "ESTETIOPAGO") {
+                        totalCoins += 1000; saveToStorage();
+                        triggerMessage("¡PAGO PROCESADO! +1000 DC 🪙💰");
+                    } else if (cleanCode === "SEVOUABOEUNUNBOUVOUESENONVOUNUNBOUNONVOU") {
+                        isAdmin = true; saveToStorage();
+                        triggerMessage("⚙️ MODO DESARROLLADOR ACTIVADO ⚙️");
+                    } else {
+                        triggerMessage("❌ CÓDIGO INVÁLIDO O EXPIRADO");
+                    }
+                }
+                return;
+            }
+
+            // ACCIONES DEL PANEL ADMIN (Solo si está desbloqueado)
+            if (isAdmin && clickY >= 370 && clickY <= 415) {
+                // +1000 DC
+                if (clickX >= 165 && clickX <= 285) {
+                    totalCoins += 1000; saveToStorage(); triggerMessage("ADMIN: +1000 DC 🔥"); return;
+                }
+                // +1 Llave
+                if (clickX >= 305 && clickX <= 425) {
+                    keysCount += 1; saveToStorage(); triggerMessage("ADMIN: +1 LLAVE 🔑"); return;
+                }
+                // +1 Tabla
+                if (clickX >= 445 && clickX <= 565) {
+                    boardsCount += 1; saveToStorage(); triggerMessage("ADMIN: +1 TABLA 🛹"); return;
+                }
+            }
+
+            // Salir de la tienda si haces click fuera de los márgenes
+            if (clickY > 460 || clickY < 230 || clickX < 140 || clickX > 610) menuSubState = "MAIN";
+        } else {
+            menuSubState = "MAIN";
+        }
+    } else if (gameState === "PLAYING") {
+        if (clickX >= pauseBtn.x && clickX <= pauseBtn.x + pauseBtn.w && clickY >= pauseBtn.y && clickY <= pauseBtn.y + pauseBtn.h) {
+            gameState = "PAUSE";
+        }
+    } else if (gameState === "PAUSE") {
+        if (clickX >= 250 && clickX <= 500 && clickY >= 230 && clickY <= 330) {
+            gameState = "PLAYING";
+        }
+    } else if (gameState === "GAMEOVER") {
+        const py = (canvas.height - 360) / 2 - 20;
+        if (clickX >= canvas.width/2 - 125 && clickX <= canvas.width/2 + 125 && clickY >= py + 210 && clickY <= py + 260 && keysCount >= currentKeysToRevive) {
+            useKeyToRevive();
+        }
+    }
+});
+
+function saveToStorage() {
+    localStorage.setItem("davo_high", highScore);
+    localStorage.setItem("davo_coins", totalCoins);
+    localStorage.setItem("davo_keys", keysCount);
+    localStorage.setItem("davo_boards", boardsCount);
+    localStorage.setItem("davo_admin", isAdmin);
+}
+
+function startGame() {
+    currentKeysToRevive = 1;
+    currentRunMultiplier = baseMultiplier;
+    gameState = "PLAYING";
+    resetGame();
+}
+
+function resetToMenu() { gameState = "MENU"; menuSubState = "MAIN"; }
+
+function useKeyToRevive() {
+    keysCount -= currentKeysToRevive;
+    currentKeysToRevive *= 2;
+    saveToStorage();
+
+    gameState = "PLAYING"; obstacles = []; coins = []; items = []; flashRedEffect = 0;
+    player.invulnerable = 140; player.jumpY = 0; player.vy = 0; player.isGrounded = true;
+    player.jetpack = 0; player.hoverboard = 350;
+    triggerMessage("¡SALVADO! Próxima reanimación: " + currentKeysToRevive + " 🔑");
+}
+
+function resetGame() {
+    obstacles = []; coins = []; items = []; particles = []; flashRedEffect = 0;
+    score = 0; coinsCollected = 0; textureOffset = 0; gameSpeed = 0.008;
+    player.lane = 1; player.targetX = lanesX[1]; player.currentX = lanesX[1];
+    player.jumpY = 0; player.vy = 0; player.isGrounded = true; player.isDucking = false;
+    player.magnet = 0; player.jetpack = 0; player.hoverboard = 0; player.invulnerable = 60;
+    horizonY = 230;
+}
+
+function addParticle(x, y, color, amt=3) {
+    for(let i=0; i<amt; i++) {
+        particles.push({
+            x: x, y: y, vx: (Math.random() - 0.5) * 6, vy: (Math.random() - 0.5) * 6,
+            life: 20 + Math.random()*15, color: color, size: 2 + Math.random()*3
+        });
+    }
+}
+
+function getTimeTheme() {
+    let hour = new Date().getHours();
+    if (hour >= 7 && hour < 19) {
+        return { type: "DAY", skyStart: "#3aafff", skyEnd: "#a1dbff", ground: "#3b4146", sleepers: "#1c1e21", rails: "#e67e22", isDark: false };
+    } else if (hour >= 19 && hour < 21) {
+        return { type: "SUNSET", skyStart: "#e65c00", skyEnd: "#f9d423", ground: "#232025", sleepers: "#110f12", rails: "#f39c12", isDark: false };
+    } else if (hour === 6) {
+        return { type: "DAWN", skyStart: "#403b4a", skyEnd: "#e7e9bb", ground: "#282a36", sleepers: "#14151b", rails: "#f1c40f", isDark: false };
+    } else {
+        return { type: "NIGHT", skyStart: "#0b0e1a", skyEnd: "#2c163f", ground: "#0f111a", sleepers: "#06070a", rails: "#ff7f11", isDark: true };
+    }
+}
+
+function getFormattedTime() {
+    let d = new Date();
+    let hrs = String(d.getHours()).padStart(2, '0');
+    let mins = String(d.getMinutes()).padStart(2, '0');
+    let secs = String(d.getSeconds()).padStart(2, '0');
+    return `${hrs}:${mins}:${secs}`;
+}
+
+function drawScenery() {
+    let theme = getTimeTheme();
+
+    if (player.jetpack > 0) {
+        horizonY += (620 - horizonY) * 0.06;
+    } else {
+        horizonY += (230 - horizonY) * 0.08;
+    }
+
+    let sky = ctx.createLinearGradient(0, 0, 0, Math.max(10, horizonY));
+    sky.addColorStop(0, theme.skyStart); sky.addColorStop(1, theme.skyEnd);
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (horizonY < canvas.height && (theme.type === "DAY" || theme.type === "SUNSET")) {
+        ctx.save();
+        ctx.fillStyle = theme.type === "DAY" ? "rgba(255, 242, 142, 0.6)" : "rgba(255, 110, 40, 0.7)";
+        ctx.shadowBlur = 40; ctx.shadowColor = theme.type === "DAY" ? "#fff" : "#ff5722";
+        ctx.beginPath(); ctx.arc(canvas.width / 2, horizonY - 20, 35, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    }
+
+    if (horizonY < canvas.height) {
+        ctx.fillStyle = theme.ground; ctx.fillRect(0, horizonY, canvas.width, canvas.height - horizonY);
+
+        const tracks = [
+            { sl: 310, sr: 345, el: 10, er: 230 },
+            { sl: 355, sr: 395, el: 265, er: 485 },
+            { sl: 405, sr: 440, el: 520, er: 740 }
+        ];
+
+        if (gameState === "PLAYING") textureOffset += gameSpeed * 340;
+        if (textureOffset > 60) textureOffset = 0;
+
+        tracks.forEach(t => {
+            ctx.fillStyle = theme.type === "DAY" ? "#4f5861" : "#1b2233"; ctx.beginPath();
+            ctx.moveTo(t.sl, horizonY); ctx.lineTo(t.sr, horizonY);
+            ctx.lineTo(t.er, canvas.height); ctx.lineTo(t.el, canvas.height); ctx.fill();
+
+            ctx.fillStyle = theme.sleepers;
+            for (let y = horizonY; y < canvas.height; y += 12) {
+                let dy = y + (textureOffset * ((y - horizonY) / (canvas.height - horizonY)));
+                if (dy > canvas.height) continue;
+                let ratio = (dy - horizonY) / (canvas.height - horizonY);
+                let wl = t.sl + (t.el - t.sl) * ratio;
+                let wr = t.sr + (t.er - t.sr) * ratio;
+                ctx.fillRect(wl - 8, dy, (wr - wl) + 16, 3 + 3 * ratio);
+            }
+
+            ctx.strokeStyle = theme.rails; ctx.lineWidth = theme.type === "DAY" ? 4 : 3; ctx.beginPath();
+            ctx.moveTo((t.sl + t.sr) / 2 - 14, horizonY); ctx.lineTo((t.el + t.er) / 2 - 42, canvas.height);
+            ctx.moveTo((t.sl + t.sr) / 2 + 14, horizonY); ctx.lineTo((t.el + t.er) / 2 + 42, canvas.height);
+            ctx.stroke();
+        });
+    }
+}
+
+function drawMenuStaticTrains() {
+    if (horizonY >= canvas.height) return;
+    let theme = getTimeTheme();
+
+    // TREN IZQUIERDO
+    ctx.save();
+    ctx.fillStyle = theme.isDark ? "#203040" : "#5d6d7e"; ctx.beginPath(); ctx.moveTo(0, horizonY - 45);
+    ctx.quadraticCurveTo(95, horizonY - 35, 180, horizonY + 10); ctx.lineTo(80, canvas.height); ctx.lineTo(0, canvas.height); ctx.fill();
+    ctx.fillStyle = "#f1c40f"; ctx.beginPath(); ctx.moveTo(25, horizonY + 35); ctx.lineTo(75, horizonY + 45); ctx.lineTo(60, horizonY + 100); ctx.lineTo(15, horizonY + 85); ctx.fill();
+
+    // ANUNCIO EN EL TREN IZQUIERDO (CON PERSPECTIVA)
+    ctx.fillStyle = "#fff"; ctx.font = "bold 13px sans-serif";
+    ctx.save(); ctx.translate(50, horizonY + 140); ctx.rotate(0.48); ctx.fillText("1000 🪙 SOLO 1€", 0, 0); ctx.restore();
+    ctx.restore();
+
+    // TREN DERECHO
+    ctx.save();
+    ctx.fillStyle = theme.isDark ? "#852222" : "#922b21"; ctx.beginPath(); ctx.moveTo(canvas.width, horizonY - 45);
+    ctx.quadraticCurveTo(canvas.width - 95, horizonY - 35, canvas.width - 180, horizonY + 10); ctx.lineTo(canvas.width - 80, canvas.height); ctx.lineTo(canvas.width, canvas.height); ctx.fill();
+
+    // ANUNCIO EN EL TREN DERECHO (CON PERSPECTIVA)
+    ctx.fillStyle = "#fff"; ctx.font = "bold 13px sans-serif";
+    ctx.save(); ctx.translate(canvas.width - 160, horizonY + 175); ctx.rotate(-0.48); ctx.fillText("1000 🪙 SOLO 1€", 0, 0); ctx.restore();
+    ctx.restore();
+}
+
+function drawPlayerModel(x, y, isDucking, isGrounded, hasJetpack, hasHoverboard) {
+    ctx.save();
+    if (player.invulnerable > 0 && Math.floor(player.invulnerable / 4) % 2 === 0) ctx.globalAlpha = 0.3;
+
+    if (horizonY < 580) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        ctx.beginPath(); ctx.ellipse(x, player.baseY - 2, isDucking ? 28 : 20, 6, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    if (hasHoverboard) {
+        ctx.fillStyle = "#00ecc6"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+        ctx.shadowBlur = 10; ctx.shadowColor = "#00ecc6";
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(x - 24, player.baseY + player.jumpY - 12, 48, 10, 4) : ctx.rect(x - 24, player.baseY + player.jumpY - 12, 48, 10);
+        ctx.fill(); ctx.stroke(); ctx.shadowBlur = 0;
+    }
+
+    let h = isDucking ? player.height * 0.55 : player.height;
+    let rY = isDucking ? y + (player.height * 0.45) : y;
+
+    if (gameState === "PLAYING") player.runFrame += 0.22;
+    let swingLeg = Math.sin(player.runFrame) * 16;
+    let swingArm = Math.cos(player.runFrame) * 14;
+
+    if (!isGrounded) { swingLeg = 18; swingArm = -20; }
+    if (hasJetpack) { swingLeg = 4; swingArm = 8; }
+
+    ctx.strokeStyle = "#1a1a1a"; ctx.lineWidth = 10; ctx.strokeStyle = "#d35400";
+    ctx.beginPath(); ctx.moveTo(x - 9, rY - h * 0.3); ctx.lineTo(x - 11 + (isGrounded?swingLeg*0.3:0), rY - (isGrounded?Math.abs(swingLeg)*0.1:-swingLeg*0.3)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x + 9, rY - h * 0.3); ctx.lineTo(x + 11 - (isGrounded?swingLeg*0.3:0), rY - (isGrounded?Math.abs(swingLeg)*0.1:swingLeg*0.3)); ctx.stroke();
+
+    ctx.fillStyle = "#2c3e50"; ctx.fillRect(x - 15, rY - h + 16, 30, h - 26);
+    ctx.fillStyle = "#f1c40f"; ctx.fillRect(x - 4, rY - h + 16, 8, h - 26);
+
+    let headY = rY - h + 5;
+    ctx.fillStyle = "#ffd2a1"; ctx.beginPath(); ctx.arc(x, headY, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#d35400"; ctx.beginPath(); ctx.arc(x, headY - 5, 12, Math.PI, 0); ctx.fill();
+    ctx.restore();
+}
+
+function drawMenu() {
+    drawScenery(); drawMenuStaticTrains();
+    drawPlayerModel(lanesX[1], player.baseY, false, true, false, false);
+
+    menuPulse += 0.045;
+    let scale = 1 + Math.sin(menuPulse) * 0.03;
+
+    ctx.save(); ctx.translate(canvas.width / 2, 105); ctx.scale(scale, scale);
+    ctx.textAlign = "center"; ctx.font = "bold 58px 'Arial Black', sans-serif";
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 10; ctx.fillStyle = "#ff7f11";
+    ctx.strokeText("SUPER DAVO RUN", 0, -15); ctx.fillText("SUPER DAVO RUN", 0, -15);
+    ctx.restore();
+
+    ctx.save();
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 20px monospace"; ctx.textAlign = "center";
+    ctx.shadowBlur = 8; ctx.shadowColor = "#ff7f11";
+    ctx.fillText("🕒 HORA REAL: " + getFormattedTime(), canvas.width / 2, 140);
+    ctx.restore();
+
+    ctx.fillStyle = getTimeTheme().isDark ? "rgba(255, 255, 255, 0.8)" : "#111";
+    ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("PULSA ESPACIO PARA EMPEZAR LA CARRERA", canvas.width / 2, 235);
+
+    if (menuSubState === "MAIN") {
+        buttons.forEach(btn => {
+            drawCyberPanel(btn.x, btn.y, btn.w, btn.h, btn.stroke, btn.color);
+            ctx.fillStyle = "#fff"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText(btn.text, btn.x + btn.w/2, btn.y + btn.h/2 + 6);
+        });
+        ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(520, 15, 215, 42, 10) : ctx.rect(520,15,215,42); ctx.fill();
+        ctx.fillStyle = "#ffd32a"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("🪙 DC: " + totalCoins + " | 🛹: " + boardsCount + " | 🔑: " + keysCount, 627, 41);
+    } else {
+        // Ventana expandida si el panel admin está desbloqueado para que quepa todo perfectamente
+        let panelHeight = isAdmin ? 255 : 240;
+        drawCyberPanel(140, 230, 470, panelHeight, "#ff7f11", "#141722");
+        ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+
+        if (menuSubState === "TOPRUN") {
+            ctx.font = "bold 22px sans-serif"; ctx.fillStyle = "#3498db"; ctx.fillText("🏆 TOP RUN (RÉCORDS)", 375, 305);
+            ctx.font = "18px sans-serif"; ctx.fillStyle = "#fff"; ctx.fillText("MÁXIMA PUNTUACIÓN: " + highScore + " PTS", 375, 370);
+        } else if (menuSubState === "ME") {
+            ctx.font = "bold 22px sans-serif"; ctx.fillStyle = "#2ecc71"; ctx.fillText("👤 ESTADO DEL PERFIL", 375, 295);
+            ctx.font = "15px sans-serif"; ctx.fillStyle = "#fff";
+            ctx.fillText("Llaves acumuladas: " + keysCount + " 🔑", 375, 345);
+            ctx.fillText("Tablas guardadas: " + boardsCount + " 🛹", 375, 375);
+            ctx.fillText("Multiplicador Inicial: x" + baseMultiplier, 375, 405);
+        } else if (menuSubState === "SHOP") {
+            ctx.font = "bold 20px sans-serif"; ctx.fillStyle = "#ff7f11"; ctx.fillText("🛒 TIENDA OFICIAL DAVO", 375, 262);
+
+            // Fila 1 de la Tienda
+            ctx.save();
+            ctx.fillStyle = "#6f3093"; ctx.strokeStyle = "#bf55ec"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.roundRect ? ctx.roundRect(165, 285, 150, 50, 8) : ctx.rect(165,285,150,50); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#ffffff"; ctx.font = "bold 11px sans-serif"; ctx.fillText("🔑 LLAVE (100 DC)", 240, 315);
+            ctx.restore();
+
+            ctx.save();
+            ctx.fillStyle = "#00ecc6"; ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.roundRect ? ctx.roundRect(335, 285, 150, 50, 8) : ctx.rect(335,285,150,50); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#0a0d14"; ctx.font = "bold 11px sans-serif"; ctx.fillText("🛹 TABLA (75 DC)", 410, 315);
+            ctx.restore();
+
+            ctx.save();
+            ctx.fillStyle = "#e67e22"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.roundRect ? ctx.roundRect(505, 285, 80, 50, 8) : ctx.rect(505,285,80,50); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.fillText("🎟️ CÓDIGO", 545, 315);
+            ctx.restore();
+
+            // RENDERIZADO DEL PANEL ADMIN EXCLUSIVO (Sólo visible si isAdmin es true)
+            if (isAdmin) {
+                ctx.fillStyle = "#e74c3c"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "left";
+                ctx.fillText("🛠️ PANEL ADMIN:", 165, 360);
+
+                // Botón Admin +1000 DC
+                ctx.save(); ctx.fillStyle = "#2c3e50"; ctx.strokeStyle = "#e74c3c"; ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.roundRect ? ctx.roundRect(165, 370, 120, 45, 6) : ctx.rect(165,370,120,45); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("+1000 DC", 225, 397); ctx.restore();
+
+                // Botón Admin +1 Llave
+                ctx.save(); ctx.fillStyle = "#2c3e50"; ctx.strokeStyle = "#e74c3c"; ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.roundRect ? ctx.roundRect(305, 370, 120, 45, 6) : ctx.rect(305,370,120,45); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("+1 LLAVE", 365, 397); ctx.restore();
+
+                // Botón Admin +1 Tabla
+                ctx.save(); ctx.fillStyle = "#2c3e50"; ctx.strokeStyle = "#e74c3c"; ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.roundRect ? ctx.roundRect(445, 370, 120, 45, 6) : ctx.rect(445,370,120,45); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("+1 TABLA", 505, 397); ctx.restore();
+            }
+
+            ctx.fillStyle = "#ffd32a"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+            ctx.fillText("Cartera Actual: " + totalCoins + " Davocoins", 375, isAdmin ? 440 : 405);
+        }
+        ctx.fillStyle = "rgba(255,255,255,0.4)"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("Haz click fuera de la ventana para salir", 375, isAdmin ? 473 : 455);
+    }
+
+    if (rewardTimer > 0) {
+        rewardTimer--; ctx.fillStyle = "#ffee55"; ctx.font = "bold 18px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(rewardMessage, canvas.width / 2, 45);
+    }
+}
+
+function checkLaneOccupation(lane) {
+    let hasObstacle = obstacles.some(o => o.lane === lane && o.z < 0.35);
+    let hasItem = items.some(it => it.lane === lane && it.z < 0.35);
+    let hasCoins = coins.some(c => Math.round(c.lane) === lane && c.z < 0.35);
+    return hasObstacle || hasItem || hasCoins;
+}
+
+function update() {
+    if (gameState === "MENU") { drawMenu(); requestAnimationFrame(update); return; }
+
+    if (gameState === "PAUSE") {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.05)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        drawCyberPanel(240, 220, 270, 110, "#ffffff", "rgba(18, 24, 38, 0.95)");
+        ctx.fillStyle = "#fff"; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText("JUEGO EN PAUSA", 375, 265);
+        ctx.fillStyle = "#00ecc6"; ctx.font = "13px sans-serif";
+        ctx.fillText("Click aquí o pulsa P para reanudar", 375, 300);
+        requestAnimationFrame(update);
+        return;
+    }
+
+    if (gameState === "GAMEOVER") {
+        ctx.clearRect(0, 0, canvas.width, canvas.height); drawScenery();
+        drawPlayerModel(player.currentX, player.baseY + player.jumpY, player.isDucking, player.isGrounded, player.jetpack > 0, player.hoverboard > 0);
+        ctx.fillStyle = "rgba(6, 4, 2, 0.75)"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        drawPopUpSubwayEdition(); requestAnimationFrame(update); return;
+    }
+
+    gameSpeed = 0.008 + (score * 0.0000035);
+    if(gameSpeed > 0.022) gameSpeed = 0.022;
+
+    currentRunMultiplier = baseMultiplier + Math.floor(score / 1500);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height); drawScenery();
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i]; p.x += p.vx; p.y += p.vy; p.life--;
+        ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.size, p.size);
+        if(p.life <= 0) particles.splice(i, 1);
+    }
+
+    if (player.invulnerable > 0) player.invulnerable--;
+    if (player.magnet > 0) player.magnet--;
+    if (player.hoverboard > 0) player.hoverboard--;
+
+    if (player.jetpack > 0) {
+        player.jetpack--;
+        player.jumpY += (-260 - player.jumpY) * 0.1; player.isGrounded = false;
+        if(player.jetpack <= 0) player.vy = 0;
+    } else if (!player.isGrounded) {
+        player.vy += player.gravity; player.jumpY += player.vy;
+        if (player.jumpY >= 0) { player.jumpY = 0; player.vy = 0; player.isGrounded = true; }
+    }
+
+    if (player.isDucking) { player.duckTimer--; if (player.duckTimer <= 0) player.isDucking = false; }
+    player.currentX += (player.targetX - player.currentX) * player.speed;
+
+    drawPlayerModel(player.currentX, player.baseY + player.jumpY, player.isDucking, player.isGrounded, player.jetpack > 0, player.hoverboard > 0);
+
+    // GENERACIÓN DE OBSTÁCULOS
+    spawnTimer++;
+    if (spawnTimer > 45 && player.jetpack <= 0) {
+        let targetLane = Math.floor(Math.random() * 3);
+        if (!checkLaneOccupation(targetLane)) {
+            obstacles.push({ lane: targetLane, z: 0, type: Math.random() > 0.5 ? "SEÑAL_ALTA" : "VALLA_BAJA" });
+        }
+        spawnTimer = 0;
+    }
+
+    // GENERACIÓN DE MONEDAS
+    coinTimer++;
+    if (coinTimer > 15) {
+        let selectedLane = Math.floor(Math.random() * 3);
+        if (player.jetpack > 0 || (!checkLaneOccupation(selectedLane) && Math.random() > 0.3)) {
+            let currentHeight = player.jetpack > 0 ? -240 : (Math.random() > 0.85 ? -75 : 0);
+            if (player.jetpack <= 0 && currentHeight === -240) currentHeight = 0;
+
+            for(let j = 0; j < 3; j++) {
+                coins.push({ lane: selectedLane, z: -j * 0.05, hOffset: currentHeight, magnetPull: false });
+            }
+        }
+        coinTimer = 0;
+    }
+
+    // GENERACIÓN DE ITEMS
+    itemTimer++;
+    if (itemTimer > 220 && player.jetpack <= 0) {
+        let targetLane = Math.floor(Math.random() * 3);
+        if (!checkLaneOccupation(targetLane)) {
+            let pool = ["MAGNET", "JETPACK"];
+            items.push({ lane: targetLane, z: 0, type: pool[Math.floor(Math.random() * pool.length)] });
+        }
+        itemTimer = 0;
+    }
+
+    // --- MONEDAS DORADAS ---
+    for (let i = coins.length - 1; i >= 0; i--) {
+        let c = coins[i];
+        if (player.jetpack <= 0 && c.hOffset === -240) { coins.splice(i, 1); continue; }
+        c.z += gameSpeed;
+        let vZ = c.z * c.z;
+
+        let sX = 375 + (c.lane - 1) * 45;
+        let cx = sX + (lanesX[Math.round(c.lane)] - sX) * vZ;
+        let cy = horizonY + (510 - horizonY) * vZ + (c.hOffset * vZ);
+        if (player.jetpack > 0) cy = 160 + (c.hOffset * 0.1) + (vZ * 80);
+        let size = 6 + 30 * vZ;
+
+        let targetPlayerX = player.currentX;
+        let targetPlayerY = player.baseY + player.jumpY - 40;
+
+        if (player.magnet > 0 && c.z > 0.82 && c.hOffset !== -240 && player.jetpack <= 0) c.magnetPull = true;
+        if (c.magnetPull) { cx = cx + (targetPlayerX - cx) * 0.32; cy = cy + (targetPlayerY - cy) * 0.32; }
+
+        ctx.save();
+        ctx.fillStyle = "#b8860b"; ctx.strokeStyle = "#e5a93b"; ctx.lineWidth = Math.max(1.5, 3 * vZ);
+        ctx.beginPath(); ctx.arc(cx, cy, size/2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+
+        ctx.fillStyle = "#fff200";
+        ctx.font = `bold ${Math.max(6, size * 0.65)}px 'Arial Black', sans-serif`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.shadowBlur = Math.max(2, 6 * vZ); ctx.shadowColor = "#ffbb00";
+        ctx.fillText("D", cx, cy + (size * 0.02));
+        ctx.restore();
+
+        let distanceToPlayerX = Math.abs(cx - targetPlayerX);
+        let distanceToPlayerY = Math.abs(cy - targetPlayerY);
+        let collisionLimit = c.magnetPull ? 65 : 28;
+        let isCloseEnough = (c.z >= 0.93 && c.z <= 1.01 && Math.round(c.lane) === player.lane);
+
+        if (isCloseEnough || (c.magnetPull && distanceToPlayerX < collisionLimit && distanceToPlayerY < collisionLimit + 25)) {
+            coinsCollected++; totalCoins++; score += 15; saveToStorage();
+            addParticle(cx, cy, "#fff200", 6); coins.splice(i, 1); continue;
+        }
+        if (c.z > 1.05) coins.splice(i, 1);
+    }
+
+    // --- ITEMS ---
+    for (let i = items.length - 1; i >= 0; i--) {
+        let it = items[i]; it.z += gameSpeed;
+        let vZ = it.z * it.z;
+        let sX = 375 + (it.lane - 1) * 45;
+        let cx = sX + (lanesX[it.lane] - sX) * vZ;
+        let cy = horizonY + (510 - horizonY) * vZ;
+        let size = 12 + 48 * vZ;
+
+        if (cy < canvas.height) {
+            ctx.fillStyle = it.type === "MAGNET" ? "#9b59b6" : "#2ecc71";
+            ctx.fillRect(cx - size/2, cy - size - 10, size, size);
+            ctx.fillStyle = "#fff"; ctx.font = `bold ${Math.max(10, size*0.5)}px Arial`; ctx.textAlign = "center";
+            ctx.fillText(it.type === "MAGNET" ? "🧲" : "🚀", cx, cy - size/2 - 4);
+
+            if (it.z >= 0.93 && it.z <= 0.99 && it.lane === player.lane && player.jetpack <= 0) {
+                addParticle(cx, cy - size, "#fff", 12);
+                if (it.type === "MAGNET") player.magnet = 450;
+                if (it.type === "JETPACK") player.jetpack = 400;
+                items.splice(i, 1); continue;
+            }
+        }
+        if (it.z > 1.05) items.splice(i, 1);
+    }
+
+    // --- OBSTÁCULOS ---
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+        let o = obstacles[i]; o.z += gameSpeed;
+        let vZ = o.z * o.z;
+        let sX = 375 + (o.lane - 1) * 45;
+        let cx = sX + (lanesX[o.lane] - sX) * vZ;
+        let cy = horizonY + (510 - horizonY) * vZ;
+        let sw = 14 + 100 * vZ; let sh = 14 + 92 * vZ;
+
+        if (cy < canvas.height && player.jetpack <= 0) {
+            ctx.save();
+            if (o.type === "VALLA_BAJA") {
+                ctx.fillStyle = "#ff7f11"; ctx.strokeStyle = "#fff"; ctx.lineWidth = Math.max(1, 3*vZ);
+                ctx.fillRect(cx - sw/2, cy - sh * 0.38, sw, sh * 0.38);
+                ctx.strokeRect(cx - sw/2, cy - sh * 0.38, sw, sh * 0.38);
+                ctx.fillStyle = "#fff"; ctx.font = `bold ${Math.max(10, sh*0.18)}px sans-serif`; ctx.textAlign = "center";
+                ctx.fillText("▲ ▲", cx, cy - sh * 0.1);
+            } else {
+                ctx.strokeStyle = "#7f8c8d"; ctx.lineWidth = Math.max(1, 4*vZ);
+                ctx.beginPath(); ctx.moveTo(cx - sw*0.4, cy); ctx.lineTo(cx - sw*0.4, cy - sh);
+                ctx.moveTo(cx + sw*0.4, cy); ctx.lineTo(cx + sw*0.4, cy - sh); ctx.stroke();
+                ctx.fillStyle = "#e74c3c"; ctx.fillRect(cx - sw/2, cy - sh, sw, sh * 0.42);
+                ctx.strokeStyle = "#fff"; ctx.strokeRect(cx - sw/2, cy - sh, sw, sh * 0.42);
+                ctx.fillStyle = "#fff"; ctx.font = `bold ${Math.max(10, sh*0.2)}px sans-serif`; ctx.textAlign = "center";
+                ctx.fillText("▼ ▼", cx, cy - sh * 0.7);
+            }
+            ctx.restore();
+
+            if (o.z >= 0.93 && o.z <= 0.98 && o.lane === player.lane && player.invulnerable <= 0) {
+                let hit = false;
+                if (o.type === "VALLA_BAJA") { if (player.jumpY >= -20) hit = true; }
+                else if (o.type === "SEÑAL_ALTA") { if (!player.isDucking || player.jumpY < -10) hit = true; }
+
+                if (hit) {
+                    if (player.hoverboard > 0) {
+                        player.hoverboard = 0; player.invulnerable = 90; obstacles.splice(i, 1);
+                        triggerMessage("¡ESCUDO DESTRUIDO! 🛹💥"); continue;
+                    }
+                    flashRedEffect = 15; gameState = "GAMEOVER"; gameOverTimer = 0;
+                }
+            }
+        }
+        if (o.z > 1.05) { obstacles.splice(i, 1); score += 20; }
+    }
+
+    // HUD Izquierdo
+    drawCyberPanel(20, 20, 240, 78, "#ff7f11", "rgba(16, 18, 27, 0.92)");
+    ctx.save();
+    ctx.fillStyle = "#ffffff"; ctx.font = "bold 26px monospace"; ctx.textAlign = "left";
+    ctx.fillText(String(Math.round(score)).padStart(7, '0'), 35, 52);
+    ctx.fillStyle = "rgba(255, 211, 42, 0.12)"; ctx.fillRect(35, 62, 210, 26);
+    ctx.fillStyle = "#ffd32a"; ctx.font = "bold 15px sans-serif";
+    ctx.fillText("🪙 Davocoins: " + coinsCollected, 42, 81);
+    ctx.restore();
+
+    // HUD Derecho
+    drawCyberPanel(565, 20, 165, 78, "#ffffff", "rgba(16, 18, 27, 0.92)");
+    ctx.save();
+    ctx.fillStyle = "#ff7f11"; ctx.font = "bold 24px 'Arial Black', sans-serif"; ctx.textAlign = "right";
+    ctx.fillText("x" + currentRunMultiplier, 715, 48);
+    ctx.fillStyle = "#00ecc6"; ctx.font = "bold 14px sans-serif";
+    ctx.fillText("🛹 Reserva: " + boardsCount, 715, 80);
+    ctx.restore();
+
+    // Botón Pausa
+    drawCyberPanel(pauseBtn.x, pauseBtn.y, pauseBtn.w, pauseBtn.h, "#ff7f11", "rgba(20, 25, 40, 0.9)");
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("⏸️", pauseBtn.x + pauseBtn.w / 2, pauseBtn.y + pauseBtn.h / 2 + 5);
+
+    // Estados activos
+    let activePower = ""; let powerPercent = 0; let barColor = "#fff";
+    if (player.jetpack > 0) { activePower = "🚀 MODO AVIONETA"; powerPercent = player.jetpack / 400; barColor = "#2ecc71"; }
+    else if (player.hoverboard > 0) { activePower = "🛹 ESCUDO DE TABLA"; powerPercent = player.hoverboard / 400; barColor = "#00ecc6"; }
+    else if (player.magnet > 0) { activePower = "🧲 IMÁN MAGNÉTICO"; powerPercent = player.magnet / 450; barColor = "#9b59b6"; }
+
+    if (activePower !== "") {
+        ctx.save();
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(10, 12, 18, 0.85)"; ctx.strokeStyle = "#444"; ctx.lineWidth = 2;
+        ctx.roundRect ? ctx.roundRect(275, 20, 200, 42, 8) : ctx.rect(275,20,200,42); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = barColor; ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(281, 46, 188 * powerPercent, 9, 4) : ctx.fillRect(281,46,188*powerPercent,9); ctx.fill();
+        ctx.fillStyle = "#ffffff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(activePower, 375, 35);
+        ctx.restore();
+    }
+
+    if (rewardTimer > 0) {
+        rewardTimer--; ctx.fillStyle = "#ffee55"; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(rewardMessage, canvas.width / 2, 180);
+    }
+
+    if (flashRedEffect > 0) {
+        flashRedEffect--; ctx.fillStyle = `rgba(255, 0, 0, ${flashRedEffect / 15 * 0.45})`; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    score += (0.25 * currentRunMultiplier);
+    requestAnimationFrame(update);
+}
+
+function drawPopUpSubwayEdition() {
+    gameOverTimer += 0.05;
+    if (score > highScore) { highScore = Math.round(score); saveToStorage(); }
+
+    const pw = 430; const ph = 370;
+    const px = (canvas.width - pw) / 2; const py = (canvas.height - ph) / 2 - 15;
+
+    drawCyberPanel(px, py, pw, ph, "#ff7f11", "#05070b");
+
+    ctx.fillStyle = "#ff4757"; ctx.font = "bold 26px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("FIN DE LA CARRERA", canvas.width / 2, py + 52);
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+    ctx.beginPath(); ctx.roundRect ? ctx.roundRect(px + 25, py + 85, pw - 50, 95, 10) : ctx.rect(px + 25, py + 85, pw - 50, 95); ctx.fill();
+
+    ctx.fillStyle = "#fff"; ctx.font = "bold 17px sans-serif";
+    ctx.fillText("PUNTOS TOTALES: " + Math.round(score), canvas.width / 2, py + 120);
+    ctx.fillStyle = "#ffd32a"; ctx.font = "bold 18px sans-serif";
+    ctx.fillText("🏆 RÉCORD: " + highScore, canvas.width / 2, py + 158);
+
+    let btnScale = 1 + Math.sin(gameOverTimer * 2.2) * 0.03;
+    ctx.save(); ctx.translate(canvas.width / 2, py + 235); ctx.scale(btnScale, btnScale);
+
+    if (keysCount >= currentKeysToRevive) {
+        ctx.fillStyle = "#218838"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.roundRect ? ctx.roundRect(-125, -25, 250, 50, 10) : ctx.rect(-125, -25, 250, 50); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "#fff"; ctx.font = "bold 14px sans-serif"; ctx.fillText("SALVARSE (🔑 x" + currentKeysToRevive + ")", 0, 5);
+    } else {
+        ctx.fillStyle = "#5a6268"; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(-125, -25, 250, 50, 10) : ctx.rect(-125, -25, 250, 50); ctx.fill();
+        ctx.fillStyle = "#d6d8db"; ctx.font = "bold 13px sans-serif"; ctx.fillText("NECESITAS " + currentKeysToRevive + " 🔑", 0, 5);
+    }
+    ctx.restore();
+
+    ctx.fillStyle = "#a8b2bd"; ctx.font = "14px sans-serif";
+    ctx.fillText("Llaves en tu mochila: " + keysCount, canvas.width / 2, py + 300);
+    ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "13px sans-serif";
+    ctx.fillText("PULSA [ESPACIO] PARA VOLVER AL MENÚ", canvas.width / 2, py + 342);
+}
+
+function triggerMessage(msg) { rewardMessage = msg; rewardTimer = 90; }
+
+requestAnimationFrame(update);
+</script>
+
+</body>
+</html>
